@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Psychedelic Experience</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #playButton {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px 40px;
+            font-size: 24px;
+            color: white;
+            background: #333;
+            border: 2px solid #fff;
+            border-radius: 10px;
+            cursor: pointer;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <button id="playButton">Play</button>
+
+    <script type="module">
+        // To run this file, start a local server. For example, in your terminal run:
+        // python -m http.server
+        // Then open http://localhost:8000/psychedelic_experience.html in your browser.
+
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+        import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+
+        class AudioEngine {
+            constructor() {
+                this.audioContext = null;
+                this.masterGain = null;
+                this.voices = new Map(); // To keep track of active sounds for each character
+            }
+
+            init() {
+                if (this.audioContext) return;
+                try {
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    this.masterGain = this.audioContext.createGain();
+                    this.masterGain.gain.value = 0.5; // Lower volume a bit
+                    this.masterGain.connect(this.audioContext.destination);
+                    console.log("AudioEngine initialized.");
+                } catch (e) {
+                    console.error("Web Audio API is not supported in this browser.", e);
+                }
+            }
+
+            triggerSound(characterIndex) {
+                if (!this.audioContext) {
+                    console.warn("AudioContext not initialized. Click 'Play' first.");
+                    return;
+                }
+
+                // Stop any existing sound for this character
+                if (this.voices.has(characterIndex)) {
+                    this.voices.get(characterIndex).forEach(node => {
+                        try { node.stop(); } catch(e) {}
+                    });
+                }
+
+                const now = this.audioContext.currentTime;
+                const duration = 60; // 60 seconds
+                const attackTime = 5;
+                const releaseTime = 10;
+
+                const baseFreq = 110 * Math.pow(2, Math.floor(Math.random() * 12) / 12); // Random root note in an octave
+                const intervals = [0, 4, 7, 12, 16]; // Major 9th chord
+                const chordFreqs = intervals.map(interval => baseFreq * Math.pow(2, interval / 12));
+
+                const activeNodes = [];
+
+                chordFreqs.forEach((freq) => {
+                    const osc = this.audioContext.createOscillator();
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(freq * (1 + Math.random() * 0.02 - 0.01), now);
+
+                    const gainNode = this.audioContext.createGain();
+                    gainNode.gain.setValueAtTime(0, now);
+                    gainNode.gain.linearRampToValueAtTime(0.1, now + attackTime);
+                    gainNode.gain.setValueAtTime(0.1, now + duration - releaseTime);
+                    gainNode.gain.linearRampToValueAtTime(0, now + duration);
+
+                    osc.connect(gainNode).connect(this.masterGain);
+                    osc.start(now);
+                    osc.stop(now + duration);
+
+                    activeNodes.push(osc, gainNode);
+                });
+
+                this.voices.set(characterIndex, activeNodes);
+
+                setTimeout(() => {
+                    this.voices.delete(characterIndex);
+                }, duration * 1000);
+            }
+        }
+
+        const audioEngine = new AudioEngine();
+
+        let scene, camera, renderer, controls, clock, ground;
+        const characters = [];
+        const raycaster = new THREE.Raycaster();
+        const pointer = new THREE.Vector2();
+
+        function onPointerDown(event) {
+            pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = - (event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(pointer, camera);
+
+            // The heads are the second child (index 1) of each character group
+            const characterHeads = characters.map(c => c.children[1]);
+            const intersects = raycaster.intersectObjects(characterHeads);
+
+            if (intersects.length > 0) {
+                const clickedHead = intersects[0].object;
+                const clickedCharacter = clickedHead.parent;
+                const characterIndex = characters.indexOf(clickedCharacter);
+
+                if (characterIndex !== -1 && !clickedCharacter.userData.isAnimating) {
+                    // Trigger the sound
+                    audioEngine.triggerSound(characterIndex);
+
+                    // Start the animation
+                    clickedCharacter.userData.isAnimating = true;
+                    clickedCharacter.userData.animationStartTime = clock.getElapsedTime();
+                }
+            }
+        }
+
+        function buildEnvironment() {
+            const environmentGroup = new THREE.Group();
+
+            // Ground
+            const groundGeometry = new THREE.PlaneGeometry(200, 200);
+            const groundMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float uTime;
+                    varying vec2 vUv;
+
+                    // 2D Random function
+                    float random(vec2 st) {
+                        return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+                    }
+
+                    // 2D Noise function based on the random function
+                    float noise(vec2 st) {
+                        vec2 i = floor(st);
+                        vec2 f = fract(st);
+                        float a = random(i);
+                        float b = random(i + vec2(1.0, 0.0));
+                        float c = random(i + vec2(0.0, 1.0));
+                        float d = random(i + vec2(1.0, 1.0));
+                        vec2 u = f * f * (3.0 - 2.0 * f);
+                        return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+                    }
+
+                    // Fractional Brownian Motion to create more complex noise
+                    float fbm(vec2 st) {
+                        float value = 0.0;
+                        float amplitude = 0.5;
+                        for (int i = 0; i < 6; i++) {
+                            value += amplitude * noise(st);
+                            st *= 2.0;
+                            amplitude *= 0.5;
+                        }
+                        return value;
+                    }
+
+                    // Psychedelic color palette function
+                    vec3 palette(float t) {
+                        return vec3(0.5 + 0.5 * cos(6.28318 * (t)),
+                                    0.5 + 0.5 * cos(6.28318 * (t + 0.33)),
+                                    0.5 + 0.5 * cos(6.28318 * (t + 0.67)));
+                    }
+
+                    void main() {
+                        vec2 st = vUv * 20.0; // Scale UVs for more detail
+                        st.x += uTime * 0.2; // Animate the pattern
+
+                        float n = fbm(st);
+                        vec3 color = palette(n + uTime * 0.1);
+
+                        gl_FragColor = vec4(color, 1.0);
+                    }
+                `,
+                side: THREE.DoubleSide
+            });
+            ground = new THREE.Mesh(groundGeometry, groundMaterial); // Assign to global 'ground'
+            ground.rotation.x = -Math.PI / 2;
+            environmentGroup.add(ground);
+
+            // Pyramids
+            const pyramidGeometry = new THREE.ConeGeometry(10, 15, 4);
+            const pyramidMaterial = new THREE.MeshStandardMaterial({ color: 0x808080, roughness: 0.8 });
+
+            const pyramid1 = new THREE.Mesh(pyramidGeometry, pyramidMaterial);
+            pyramid1.position.set(-40, 7.5, -50);
+            environmentGroup.add(pyramid1);
+
+            const pyramid2 = new THREE.Mesh(pyramidGeometry, pyramidMaterial);
+            pyramid2.position.set(40, 7.5, -50);
+            environmentGroup.add(pyramid2);
+
+            // Pillars
+            const pillarGeometry = new THREE.CylinderGeometry(2, 2, 20, 8);
+            const pillarMaterial = new THREE.MeshStandardMaterial({ color: 0xff00ff });
+            for (let i = 0; i < 6; i++) {
+                const pillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+                pillar.position.set(-50 + i * 20, 10, -80);
+                environmentGroup.add(pillar);
+            }
+
+            return environmentGroup;
+        }
+
+        function buildCharacter() {
+            const characterGroup = new THREE.Group();
+
+            // Body (Kimono)
+            const bodyGeometry = new THREE.BoxGeometry(1.5, 3, 0.5);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x800080 }); // Purple for now
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.y = 1.5;
+            characterGroup.add(body);
+
+            // Head
+            const headGeometry = new THREE.SphereGeometry(1, 32, 32);
+
+            // Placeholder Shader Material for the face
+            const headMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uMouthOpen: { value: 0.0 } // 0.0 = closed, 1.0 = open
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float uTime;
+                    uniform float uMouthOpen; // 0.0 to 1.0
+                    varying vec2 vUv;
+
+                    // Function to draw a circle, returns 1 inside, 0 outside
+                    float circle(vec2 uv, vec2 pos, float radius, float blur) {
+                        return 1.0 - smoothstep(radius - blur, radius + blur, distance(uv, pos));
+                    }
+
+                    void main() {
+                        vec2 p = vUv - 0.5; // Center coordinates
+
+                        // Psychedelic warp effect
+                        p.x += sin(p.y * 25.0 + uTime * 1.5) * 0.02 * sin(uTime * 0.5);
+                        p.y += cos(p.x * 25.0 + uTime * 1.5) * 0.02 * sin(uTime * 0.5);
+
+                        // Base face color
+                        vec3 color = vec3(0.1, 0.7, 0.2);
+
+                        // Eyes
+                        float eye1 = circle(p, vec2(-0.15, 0.15), 0.1, 0.01);
+                        float eye2 = circle(p, vec2(0.15, 0.15), 0.1, 0.01);
+                        color = mix(color, vec3(0.8, 0.1, 0.1), max(eye1, eye2)); // Red eyes
+
+                        // Pupils
+                        float pupil1 = circle(p, vec2(-0.15, 0.15), 0.05, 0.01);
+                        float pupil2 = circle(p, vec2(0.15, 0.15), 0.05, 0.01);
+                        color = mix(color, vec3(0.0, 0.0, 0.0), max(pupil1, pupil2)); // Black pupils
+
+                        // Nose (simple triangle)
+                        float nose = smoothstep(-0.05, 0.0, -abs(p.x) + p.y * 0.4 + 0.05);
+                        color = mix(color, vec3(0.9, 0.7, 0.1), nose * 0.5);
+
+                        // Mouth (animated rectangle)
+                        float mouthHeight = uMouthOpen * 0.1;
+                        float mouthWidth = 0.2;
+                        // A bit of math to create a rectangle shape
+                        float mouthX = step(-mouthWidth, p.x) - step(mouthWidth, p.x);
+                        float mouthY = step(-0.2 - mouthHeight, p.y) - step(-0.2 + mouthHeight, p.y);
+                        float mouth = mouthX * mouthY;
+                        color = mix(color, vec3(0.0, 0.0, 0.0), mouth);
+
+                        // Prevent texture wrapping by checking normals (requires passing normals from vertex shader)
+                        // A simpler way for now is to check UVs, but this can be imprecise.
+                        // Let's only draw in the front-facing part of the UV map.
+                        if (distance(vUv, vec2(0.5, 0.5)) > 0.5) {
+                           discard;
+                        }
+
+                        gl_FragColor = vec4(color, 1.0);
+                    }
+                `
+            });
+
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.y = 4.0; // Position on top of the body
+            characterGroup.add(head);
+
+            characterGroup.userData = { isAnimating: false, animationStartTime: 0 };
+
+            return characterGroup;
+        }
+
+        function init() {
+            clock = new THREE.Clock();
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2, 10);
+
+            renderer = new THREE.WebGLRenderer({ canvas: document.querySelector('#c'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            // Lighting and Scene Background
+            scene.background = new THREE.Color(0x1a0033); // Dark violet sky
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(0, 50, 20);
+            scene.add(directionalLight);
+
+            // Build the environment
+            const environment = buildEnvironment();
+            scene.add(environment);
+
+            // Create and place characters
+            const characterPositions = [-9, -3, 3, 9];
+            characterPositions.forEach(x => {
+                const character = buildCharacter();
+                character.position.set(x, 0, 0);
+                scene.add(character);
+                characters.push(character);
+            });
+
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('pointerdown', onPointerDown);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsedTime = clock.getElapsedTime();
+
+            // Update ground shader time
+            if (ground && ground.material.uniforms.uTime) {
+                ground.material.uniforms.uTime.value = elapsedTime;
+            }
+
+            // Update uniforms and animations for each character
+            characters.forEach(character => {
+                const head = character.children[1]; // Head is the second child
+                if (head && head.material.uniforms) {
+                    head.material.uniforms.uTime.value = elapsedTime;
+
+                    if (character.userData.isAnimating) {
+                        const animationTime = elapsedTime - character.userData.animationStartTime;
+                        const animationDuration = 60; // 60 seconds
+
+                        if (animationTime < animationDuration) {
+                            // Use a smooth Math.sin curve for the animation progress
+                            // This will go from 0 -> 1 -> 0 over the duration
+                            const progress = Math.sin((animationTime / animationDuration) * Math.PI);
+                            head.material.uniforms.uMouthOpen.value = progress;
+                            head.scale.set(1 + progress * 0.5, 1 + progress * 0.5, 1 + progress * 0.5);
+                        } else {
+                            // Animation finished, reset state
+                            character.userData.isAnimating = false;
+                            head.material.uniforms.uMouthOpen.value = 0;
+                            head.scale.set(1, 1, 1);
+                        }
+                    }
+                }
+            });
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // Initial setup
+        init();
+        animate();
+
+        const playButton = document.getElementById('playButton');
+        playButton.addEventListener('click', () => {
+            playButton.style.display = 'none';
+            // Initialize the Audio Engine on user gesture
+            audioEngine.init();
+        });
+
+    </script>
+</body>
+</html>
