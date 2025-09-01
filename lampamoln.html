@@ -104,7 +104,7 @@
     // Globals
     let renderer, scene, camera, clock;
     let chandelier, bulbs = [], bulbClickTargets = [];
-    let wineGlass;
+    let wineGlass, ankh;
     let redAmbient, pointLight;
 
     const fxCanvas = document.getElementById('fx');
@@ -170,6 +170,11 @@
       wineGlass = buildWineGlass();
       wineGlass.position.set(1.4, -0.2, -0.6);
       scene.add(wineGlass);
+
+      ankh = buildAnkh();
+      ankh.position.set(0, -0.7, 0);
+      ankh.scale.set(0.8, 0.8, 0.8);
+      chandelier.add(ankh);
 
       // Background LSD
       const lsd = buildLSDPlane();
@@ -364,6 +369,40 @@
       const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
       quad.renderOrder = -1;
       return { mesh: quad, uniforms };
+    }
+
+    function buildAnkh() {
+      const group = new THREE.Group();
+      // Using the same material properties as the chandelier for consistency
+      const matBrass = new THREE.MeshStandardMaterial({
+        color: 0x6f4a2d, metalness: 0.85, roughness: 0.3, envMapIntensity: 1.0
+      });
+
+      // Top loop of the ankh
+      const loop = new THREE.Mesh(
+        new THREE.TorusGeometry(0.15, 0.04, 16, 64),
+        matBrass
+      );
+      loop.position.y = 0.25;
+      group.add(loop);
+
+      // Vertical bar of the ankh
+      const vertBar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.5, 0.08),
+        matBrass
+      );
+      vertBar.position.y = -0.05;
+      group.add(vertBar);
+
+      // Horizontal bar of the ankh
+      const horizBar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 0.08, 0.08),
+        matBrass
+      );
+      horizBar.position.y = 0.1;
+      group.add(horizBar);
+
+      return group;
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
