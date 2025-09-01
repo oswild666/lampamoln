@@ -108,6 +108,7 @@
         const audioEngine = new AudioEngine();
 
         let scene, camera, renderer, controls, clock, ground;
+        let isInitialized = false;
         const characters = [];
         const raycaster = new THREE.Raycaster();
         const pointer = new THREE.Vector2();
@@ -408,15 +409,18 @@
             renderer.render(scene, camera);
         }
 
-        // Initial setup
-        init();
-        animate();
-
         const playButton = document.getElementById('playButton');
         playButton.addEventListener('click', () => {
+            if (isInitialized) return;
+            isInitialized = true;
+
             playButton.style.display = 'none';
+
             // Initialize the Audio Engine on user gesture
             audioEngine.init();
+
+            init();
+            animate();
         });
 
     </script>
