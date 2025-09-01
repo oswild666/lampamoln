@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>1920s Esoteric Chandelier — Three.js + WebAudio (ESM)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; background:#210000; }
+    canvas.webgl { display:block; position:fixed; inset:0; z-index:0; }
+    #fx { position:fixed; inset:0; pointer-events:none; z-index:5; }
+
+    #hud {
+      position: fixed; left: 16px; bottom: 16px; right: 16px;
+      color: #ffd9d9; font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      z-index: 10;
+    }
+    #hud .panel {
+      display:inline-block; background:rgba(50,0,0,0.55); border:1px solid rgba(255,120,120,0.25);
+      border-radius:10px; padding:10px 12px; margin: 6px 6px 0 0; pointer-events: auto;
+      backdrop-filter: blur(3px);
+    }
+    #hud strong { color:#ffb3b3; }
+
+    #roadWrap {
+      position: fixed; right: 16px; top: 16px; width: 340px; height: 240px; pointer-events: auto;
+      z-index: 12;
+    }
+    #roadWrap svg { width:100%; height:100%; display:block; }
+    .stone { cursor: grab; }
+    .stone:active { cursor: grabbing; }
+
+    #playBtn {
+      position: fixed; left: 16px; top: 16px; z-index: 20;
+      padding: 10px 14px; border-radius: 10px; border:1px solid rgba(255,160,160,0.4);
+      background: linear-gradient(180deg, rgba(120,0,0,0.7), rgba(80,0,0,0.7));
+      color:#ffd9d9; font: 14px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+      backdrop-filter: blur(4px);
+      cursor: pointer;
+    }
+    #playBtn[aria-pressed="true"] {
+      background: linear-gradient(180deg, rgba(10,120,40,0.8), rgba(10,80,30,0.8));
+      border-color: rgba(180,255,200,0.45);
+      color: #eaffef;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 2D молнии поверх -->
+  <canvas id="fx"></canvas>
+
+  <!-- SVG контроллер "аморфная дорога" -->
+  <div id="roadWrap" class="panel">
+    <svg viewBox="0 0 340 240">
+      <defs>
+        <linearGradient id="roadGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4a0000"/>
+          <stop offset="100%" stop-color="#7a0000"/>
+        </linearGradient>
+        <filter id="goo">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+          <feColorMatrix in="blur" mode="matrix"
+            values="1 0 0 0 0
+                    0 1 0 0 0
+                    0 0 1 0 0
+                    0 0 0 18 -8" result="goo"/>
+          <feBlend in="SourceGraphic" in2="goo"/>
+        </filter>
+      </defs>
+      <path id="road" d="M 20 200 C 60 60, 140 230, 170 130 S 320 20, 320 160"
+            fill="none" stroke="url(#roadGrad)" stroke-width="24" stroke-linecap="round"
+            filter="url(#goo)" />
+      <path id="roadHit" d="M 20 200 C 60 60, 140 230, 170 130 S 320 20, 320 160"
+            fill="none" stroke="transparent" stroke-width="36" />
+      <circle id="stone" class="stone" cx="20" cy="200" r="11"
+              fill="#ffb3b3" stroke="#ffc4c4" stroke-width="2" />
+      <text x="12" y="228" fill="#ffcaca" font-size="10" font-family="monospace">длительность</text>
+    </svg>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="legend" class="panel">
+      <div><strong>Люстра:</strong> крутите мышью влево/вправо — тональность вниз/вверх. Быстрое движение даёт инерцию.</div>
+      <div><strong>Лампочки (5):</strong> клики запускают ноты. Все вместе — мажорный аккорд (root, M3, P5, 8ve, 9th).</div>
+      <div><strong>Камень:</strong> тяните — меняется длительность нот и молний. Фон ускоряется при раскрутке.</div>
+    </div>
+  </div>
+
+  <!-- Кнопка включения/разрешения звука -->
+  <button id="playBtn" aria-pressed="false">Play / Включить звук</button>
+
+  <script type="module">
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ES Modules
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    // Пример URL ESM для Csound (опционально). Если используете — импортируйте и инициализируйте.
+    const CSOUND_MODULE_URL = ''; // при необходимости подставьте ESM-URL csound.js
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Globals
+    let renderer, scene, camera, clock;
+    let chandelier, bulbs = [], bulbClickTargets = [];
+    let wineGlass;
+    let redAmbient, pointLight;
+
+    const fxCanvas = document.getElementById('fx');
+    const fxCtx = fxCanvas.getContext('2d');
+    const lightnings = []; // {x, y, until, hue}
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+
+    // Audio
+    const audio = {
+      ctx: null, master: null, delay: null,
+      voices: new Map(),    // lampIndex -> { baseFreq, sub, saw1, saw2, filter, gain, pan, stopAt }
+      basePitchFactor: 1.0, // изменяется от поворота
+      chordRootHz: null,
+      assignedIntervals: new Map(), // lampIndex -> interval
+      intervalsPool: [0, 4, 7, 12, 16],
+      voiceDurationSec: 10,
+      csound: null, csLoaded: false
+    };
+
+    // Interaction/rotation
+    let isDragging = false, lastX = 0, lastT = 0;
+    let angularVelocity = 0;
+    const damping = 0.985;
+    const rotationToOctave = Math.PI * 2;
+
+    // LSD shader quad
+    let lsdQuad, lsdUniforms;
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Init
+    init();
+    animate();
+
+    async function init() {
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setClearColor(0x300000, 1);
+      renderer.domElement.classList.add('webgl');
+      document.body.appendChild(renderer.domElement);
+
+      // Scene & Camera
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 100);
+      camera.position.set(0, 1.2, 4.2);
+      clock = new THREE.Clock();
+
+      // Lights
+      redAmbient = new THREE.HemisphereLight(0x7a0000, 0x220000, 0.9);
+      scene.add(redAmbient);
+      pointLight = new THREE.PointLight(0xffb9a9, 18, 30, 2.0);
+      pointLight.position.set(0, 0.6, 0.2);
+      scene.add(pointLight);
+
+      // Chandelier & wine glass
+      chandelier = buildChandelier1920s();
+      chandelier.position.y = 0.2;
+      scene.add(chandelier);
+
+      wineGlass = buildWineGlass();
+      wineGlass.position.set(1.4, -0.2, -0.6);
+      scene.add(wineGlass);
+
+      // Background LSD
+      const lsd = buildLSDPlane();
+      lsdQuad = lsd.mesh;
+      lsdUniforms = lsd.uniforms;
+      scene.add(lsdQuad);
+
+      // Events
+      onResize();
+      onFxResize();
+      addEventListeners();
+
+      // Optional Csound
+      if (CSOUND_MODULE_URL) {
+        try {
+          const mod = await import(CSOUND_MODULE_URL);
+          audio.csound = mod.default || mod;
+          audio.csLoaded = !!audio.csound;
+        } catch (e) {}
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Builders
+
+    function buildChandelier1920s() {
+      const group = new THREE.Group();
+
+      const matBrass = new THREE.MeshStandardMaterial({
+        color: 0x6f4a2d, metalness: 0.85, roughness: 0.3, envMapIntensity: 1.0
+      });
+      const matBulb = new THREE.MeshPhysicalMaterial({
+        color: 0xfff2d8, emissive: 0x73411a, emissiveIntensity: 0.35,
+        transmission: 0.6, thickness: 0.25, roughness: 0.2, metalness: 0.1, clearcoat: 0.5
+      });
+
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.9, 12), matBrass);
+      stem.position.y = 0.5;
+      group.add(stem);
+
+      const core = new THREE.Mesh(new THREE.SphereGeometry(0.22, 24, 16), matBrass);
+      core.position.y = 0.05;
+      group.add(core);
+
+      // Arms & bulbs (5)
+      const armCount = 5, radius = 0.85, bulbRadius = 0.10;
+      const armGeom = new THREE.TorusGeometry(0.4, 0.03, 8, 48, Math.PI * 0.7);
+
+      for (let i = 0; i < armCount; i++) {
+        const theta = (i / armCount) * Math.PI * 2;
+
+        const arm = new THREE.Mesh(armGeom, matBrass);
+        arm.position.set(Math.cos(theta) * radius * 0.5, -0.05, Math.sin(theta) * radius * 0.5);
+        arm.rotation.set(0, -theta, Math.PI * 0.15);
+        group.add(arm);
+
+        const holder = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.15, 12), matBrass);
+        holder.position.set(Math.cos(theta) * radius, -0.02, Math.sin(theta) * radius);
+        holder.rotation.y = -theta;
+        group.add(holder);
+
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(bulbRadius, 24, 16), matBulb);
+        bulb.position.copy(holder.position).add(new THREE.Vector3(0, -0.12, 0));
+        bulb.userData.lampIndex = i;
+        group.add(bulb);
+        bulbs.push(bulb);
+
+        const click = new THREE.Mesh(
+          new THREE.SphereGeometry(bulbRadius * 1.25, 16, 12),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.05 })
+        );
+        click.position.copy(bulb.position);
+        click.userData.lampIndex = i;
+        group.add(click);
+        bulbClickTargets.push(click);
+      }
+      return group;
+    }
+
+    function buildWineGlass() {
+      const points = [];
+      points.push(new THREE.Vector2(0.0, -0.9));
+      points.push(new THREE.Vector2(0.1, -0.9));
+      points.push(new THREE.Vector2(0.12, -0.7));
+      points.push(new THREE.Vector2(0.08, -0.4));
+      points.push(new THREE.Vector2(0.12, -0.05));
+      points.push(new THREE.Vector2(0.35, 0.1));
+      points.push(new THREE.Vector2(0.45, 0.3));
+      points.push(new THREE.Vector2(0.5, 0.55));
+      points.push(new THREE.Vector2(0.45, 0.7));
+      points.push(new THREE.Vector2(0.35, 0.78));
+      points.push(new THREE.Vector2(0.05, 0.8));
+
+      const lathe = new THREE.LatheGeometry(points, 64);
+      const matGlass = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff, transmission: 0.9, thickness: 0.5, roughness: 0.1, metalness: 0.0,
+        clearcoat: 0.9, clearcoatRoughness: 0.05, ior: 1.52
+      });
+      return new THREE.Mesh(lathe, matGlass);
+    }
+
+    function buildLSDPlane() {
+      // Acid fractal: domain warp + FBM + kaleidoscope
+      const uniforms = {
+        u_time: { value: 0 },
+        u_speed: { value: 0.7 },
+        u_res: { value: new THREE.Vector2(innerWidth, innerHeight) },
+        u_intensity: { value: 1.0 },
+        u_redBase: { value: new THREE.Color(0.18, 0.02, 0.02) }
+      };
+
+      const vertex = `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `;
+
+      const fragment = `
+        precision highp float;
+        varying vec2 vUv;
+        uniform vec2 u_res;
+        uniform float u_time;
+        uniform float u_speed;
+        uniform float u_intensity;
+        uniform vec3 u_redBase;
+
+        float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+        float noise(vec2 p){
+          vec2 i = floor(p), f = fract(p);
+          float a = hash(i), b = hash(i+vec2(1,0));
+          float c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
+          vec2 u = f*f*(3.0-2.0*f);
+          return mix(a, b, u.x) + (c-a)*u.y*(1.0-u.x) + (d-b)*u.x*u.y;
+        }
+        float fbm(vec2 p){
+          float s = 0.0, a = 0.5;
+          for(int i=0;i<6;i++){
+            s += a * noise(p);
+            p = mat2(1.6,1.2,-1.2,1.6) * p + 0.03;
+            a *= 0.55;
+          }
+          return s;
+        }
+        vec2 kale(vec2 uv, float n){
+          vec2 p = uv - 0.5;
+          float r = length(p);
+          float a = atan(p.y, p.x);
+          float sector = 6.28318530718 / n;
+          a = mod(a, sector);
+          a = abs(a - sector * 0.5);
+          return vec2(cos(a), sin(a)) * r + 0.5;
+        }
+        vec3 palette(float t){
+          vec3 a = vec3(0.5, 0.5, 0.5);
+          vec3 b = vec3(0.5, 0.5, 0.5);
+          vec3 c = vec3(1.0, 0.8, 0.6);
+          vec3 d = vec3(0.0, 0.2, 0.4);
+          return a + b * cos(6.28318*(c*t + d));
+        }
+
+        void main(){
+          vec2 uv = vUv;
+          float t = u_time * u_speed;
+
+          uv = kale(uv + 0.02*sin(vec2(0.9,1.2)*t*0.4), 7.0);
+          vec2 p = (uv - 0.5) * 2.0;
+
+          float w1 = fbm(p*2.0 + vec2(0.3*t, -0.2*t));
+          float w2 = fbm(p*3.5 + vec2(-0.15*t, 0.25*t));
+          vec2 q = p + 0.35*vec2(w1 - 0.5, w2 - 0.5);
+
+          float n = fbm(q*4.0 + 0.2*t);
+          float rings = sin(10.0*length(q) + 2.0*t + 4.0*n);
+
+          float m = smoothstep(0.15, 0.85, n) * 0.7 + 0.3 * smoothstep(-1.0, 1.0, rings);
+          vec3 col = palette(n*1.2 + 0.1 * rings);
+          col = mix(u_redBase, col, clamp(u_intensity, 0.0, 1.0));
+          col *= (0.5 + 0.5*m);
+          col += 0.06 * vec3(smoothstep(0.7, 1.0, m));
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `;
+
+      const mat = new THREE.ShaderMaterial({
+        uniforms, vertexShader: vertex, fragmentShader: fragment,
+        depthTest: false, depthWrite: false
+      });
+
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      quad.renderOrder = -1;
+      return { mesh: quad, uniforms };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Audio
+
+    const MAX_FREQ = 16000;
+    const MIN_FREQ = 20;
+    function clampFreq(hz) { return Math.max(MIN_FREQ, Math.min(MAX_FREQ, hz)); }
+
+    function ensureAudio() {
+      if (audio.ctx) return;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audio.ctx = ctx;
+
+      audio.master = ctx.createGain();
+      audio.master.gain.value = 0.65;
+
+      const shelf = ctx.createBiquadFilter();
+      shelf.type = 'lowshelf'; shelf.frequency.value = 180; shelf.gain.value = 3;
+
+      const delay = ctx.createDelay(4.0);
+      const fb = ctx.createGain(); fb.gain.value = 0.35;
+      delay.delayTime.value = 0.48;
+      delay.connect(fb).connect(delay);
+      audio.delay = delay;
+
+      audio.master.connect(shelf).connect(delay).connect(ctx.destination);
+      audio.master.connect(ctx.destination);
+    }
+
+    async function resumeAudio() {
+      ensureAudio();
+      if (audio.ctx && audio.ctx.state !== 'running') {
+        try { await audio.ctx.resume(); } catch(e) {}
+      }
+    }
+
+    function hzFromMidi(m) { return 440 * Math.pow(2, (m - 69)/12); }
+    function randomRootMidi() {
+      const pool = [36,38,40,41,43,45,47,48,50,52,55];
+      return pool[(Math.random()*pool.length)|0];
+    }
+
+    function startLampVoice(lampIndex) {
+      ensureAudio();
+      if (!audio.ctx) return;
+
+      const ctx = audio.ctx;
+      const now = ctx.currentTime;
+
+      if (audio.chordRootHz == null || audio.assignedIntervals.size === 0) {
+        audio.chordRootHz = hzFromMidi(randomRootMidi());
+        audio.assignedIntervals.clear();
+      }
+      if (!audio.assignedIntervals.has(lampIndex)) {
+        const used = new Set(audio.assignedIntervals.values());
+        const next = audio.intervalsPool.find(iv => !used.has(iv)) ?? 0;
+        audio.assignedIntervals.set(lampIndex, next);
+      }
+      const interval = audio.assignedIntervals.get(lampIndex);
+      const baseFreq = audio.chordRootHz * Math.pow(2, interval / 12);
+
+      const gain = ctx.createGain();
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 520;
+      filter.Q.value = 0.9;
+
+      const sub = ctx.createOscillator(); sub.type = 'sine';
+      const saw1 = ctx.createOscillator(); saw1.type = 'sawtooth';
+      const saw2 = ctx.createOscillator(); saw2.type = 'sawtooth';
+
+      // Subtle vibrato
+      const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.25 + Math.random()*0.15;
+      const lfoGain = ctx.createGain(); lfoGain.gain.value = 3.0;
+      lfo.connect(lfoGain); lfoGain.connect(saw1.detune);
+      const lfo2Gain = ctx.createGain(); lfo2Gain.gain.value = 2.0;
+      lfo.connect(lfo2Gain); lfo2Gain.connect(saw2.detune);
+
+      const lfoF = ctx.createOscillator(); lfoF.type = 'sine'; lfoF.frequency.value = 0.08 + Math.random()*0.06;
+      const lfoFg = ctx.createGain(); lfoFg.gain.value = 110;
+      lfoF.connect(lfoFg); lfoFg.connect(filter.frequency);
+
+      const pan = ctx.createStereoPanner();
+      const bulb = bulbs[lampIndex];
+      if (bulb) {
+        const world = new THREE.Vector3();
+        bulb.getWorldPosition(world);
+        pan.pan.value = Math.max(-0.9, Math.min(0.9, world.x / 1.2));
+      }
+
+      const dur = Math.max(1.5, audio.voiceDurationSec);
+      const atk = Math.min(4.0, dur * 0.35);
+      const rel = Math.min(6.0, dur * 0.45);
+
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(0.85, now + atk);
+      gain.gain.setTargetAtTime(0.65, now + atk, 0.9);
+      gain.gain.setValueAtTime(0.65, now + Math.max(atk, dur - rel));
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+      const fSub = clampFreq(baseFreq * audio.basePitchFactor * 0.5);
+      const fSaw1 = clampFreq(baseFreq * audio.basePitchFactor);
+      const fSaw2 = clampFreq(baseFreq * audio.basePitchFactor * 0.999);
+
+      sub.frequency.value = fSub;
+      saw1.frequency.value = fSaw1;
+      saw2.frequency.value = fSaw2;
+
+      sub.connect(filter);
+      saw1.connect(filter);
+      saw2.connect(filter);
+      filter.connect(gain);
+      gain.connect(pan).connect(audio.delay);
+      gain.connect(pan).connect(audio.master);
+
+      sub.start(now);
+      saw1.start(now);
+      saw2.start(now);
+      lfo.start(now);
+      lfoF.start(now);
+
+      const stopAt = now + dur + 0.1;
+      [sub, saw1, saw2, lfo, lfoF].forEach(o => o.stop(stopAt));
+
+      audio.voices.set(lampIndex, { baseFreq, sub, saw1, saw2, filter, gain, pan, stopAt });
+      spawnLightningFromBulb(lampIndex, dur);
+
+      setTimeout(() => {
+        const v = audio.voices.get(lampIndex);
+        if (!v) return;
+        if (audio.ctx && audio.ctx.currentTime >= v.stopAt - 0.05) {
+          [v.sub, v.saw1, v.saw2, v.filter, v.gain, v.pan].forEach(n => { try { n.disconnect(); } catch(_){} });
+          audio.voices.delete(lampIndex);
+          if (audio.voices.size === 0) {
+            audio.chordRootHz = null;
+            audio.assignedIntervals.clear();
+          }
+        }
+      }, (dur + 0.6) * 1000);
+    }
+
+    function retuneActiveVoices() {
+      if (!audio.ctx) return;
+      const now = audio.ctx.currentTime;
+      for (const v of audio.voices.values()) {
+        const fSub = clampFreq(v.baseFreq * audio.basePitchFactor * 0.5);
+        const fSaw1 = clampFreq(v.baseFreq * audio.basePitchFactor);
+        const fSaw2 = clampFreq(v.baseFreq * audio.basePitchFactor * 0.999);
+        if (v.sub && v.saw1 && v.saw2) {
+          v.sub.frequency.setTargetAtTime(fSub, now, 0.03);
+          v.saw1.frequency.setTargetAtTime(fSaw1, now, 0.03);
+          v.saw2.frequency.setTargetAtTime(fSaw2, now, 0.03);
+        }
+      }
+    }
+
+    function clamp(x, a, b){ return Math.max(a, Math.min(b, x)); }
+    function wrapPi(a){
+      a = (a + Math.PI) % (Math.PI * 2);
+      if (a < 0) a += Math.PI * 2;
+      return a - Math.PI;
+    }
+
+    function updateGlobalPitchFactor() {
+      chandelier.rotation.y = wrapPi(chandelier.rotation.y);
+      const angle = chandelier.rotation.y;
+      const octaves = angle / rotationToOctave;
+      audio.basePitchFactor = clamp(Math.pow(2, octaves), 0.25, 4.0); // ±2 октавы
+      retuneActiveVoices();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Lightning overlay
+
+    function onFxResize() {
+      fxCanvas.width = innerWidth * devicePixelRatio;
+      fxCanvas.height = innerHeight * devicePixelRatio;
+      fxCtx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+    }
+
+    function spawnLightningFromBulb(lampIndex, durationSec) {
+      const bulb = bulbs[lampIndex];
+      if (!bulb) return;
+      const p = new THREE.Vector3();
+      bulb.parent.updateWorldMatrix(true, true);
+      bulb.getWorldPosition(p);
+      const projected = p.clone().project(camera);
+      const x = (projected.x * 0.5 + 0.5) * innerWidth;
+      const y = (-projected.y * 0.5 + 0.5) * innerHeight;
+
+      const until = performance.now() + durationSec * 1000;
+      const hue = 10 + (lampIndex * 60) % 360;
+      lightnings.push({ x, y, until, hue });
+    }
+
+    function drawLightnings() {
+      const now = performance.now();
+      fxCtx.clearRect(0, 0, innerWidth, innerHeight);
+
+      for (let i = lightnings.length - 1; i >= 0; i--) {
+        const L = lightnings[i];
+        const life = (L.until - now) / 1000;
+        if (life <= 0) {
+          lightnings.splice(i, 1);
+          continue;
+        }
+
+        const segments = 8 + ((now / 60 + i) % 5) | 0;
+        const len = 90 + 60 * Math.sin(now * 0.004 + i);
+        const jitter = 22 + 10 * Math.sin(now * 0.01 + i);
+        const alpha = Math.min(0.9, Math.max(0.12, life / 2.2));
+
+        fxCtx.lineWidth = 2;
+        fxCtx.strokeStyle = `hsla(${L.hue}, 80%, 70%, ${alpha})`;
+        fxCtx.beginPath();
+        fxCtx.moveTo(L.x, L.y);
+        let px = L.x, py = L.y;
+        for (let s = 0; s < segments; s++) {
+          const nx = px + (len / segments) + (Math.random() * 2 - 1) * jitter;
+          const ny = py + (Math.random() * 2 - 1) * jitter;
+          fxCtx.lineTo(nx, ny);
+          px = nx; py = ny;
+        }
+        fxCtx.stroke();
+
+        fxCtx.lineWidth = 6;
+        fxCtx.strokeStyle = `hsla(${L.hue}, 100%, 70%, ${alpha * 0.25})`;
+        fxCtx.stroke();
+
+        for (let b = 0; b < 2; b++) {
+          const branchAlpha = alpha * 0.5;
+          fxCtx.lineWidth = 1.5;
+          fxCtx.strokeStyle = `hsla(${L.hue + 40}, 90%, 75%, ${branchAlpha})`;
+          fxCtx.beginPath();
+          fxCtx.moveTo(L.x, L.y);
+          let bx = L.x, by = L.y;
+          for (let s = 0; s < segments - 2; s++) {
+            const nx = bx + (len / segments) + (Math.random() * 2 - 1) * jitter * 0.6;
+            const ny = by + (Math.random() * 2 - 1) * jitter * 0.6;
+            fxCtx.lineTo(nx, ny);
+            bx = nx; by = ny;
+          }
+          fxCtx.stroke();
+        }
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // UI / events
+
+    function addEventListeners() {
+      window.addEventListener('resize', onResize);
+      window.addEventListener('resize', onFxResize);
+
+      // Кнопка Play: явное разрешение аудио
+      const playBtn = document.getElementById('playBtn');
+      playBtn.addEventListener('click', async () => {
+        await resumeAudio();
+        if (audio.ctx && audio.ctx.state === 'running') {
+          playBtn.setAttribute('aria-pressed', 'true');
+          playBtn.textContent = 'Audio: ON';
+        }
+      });
+
+      // Любой клик по WebGL-полотну тоже пробует resume (на случай, если кнопку не нажали)
+      renderer.domElement.addEventListener('pointerdown', async (e) => {
+        await resumeAudio();
+        isDragging = true; lastX = e.clientX; lastT = performance.now();
+
+        // Raycast по кликовым сферам лампочек
+        pointer.x = (e.clientX / innerWidth) * 2 - 1;
+        pointer.y = -(e.clientY / innerHeight) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObjects(bulbClickTargets, false);
+        if (hits.length > 0) {
+          const idx = hits[0].object.userData.lampIndex;
+          startLampVoice(idx);
+        }
+      });
+
+      window.addEventListener('pointermove', (e) => {
+        if (!isDragging) return;
+
+        const now = performance.now();
+        const dx = e.clientX - lastX;
+        const dt = (now - lastT) / 1000;
+
+        chandelier.rotation.y += dx * 0.005;
+        updateGlobalPitchFactor();
+
+        angularVelocity = dx / Math.max(dt, 0.001) * 0.0005;
+
+        lastX = e.clientX;
+        lastT = now;
+      });
+
+      window.addEventListener('pointerup', () => {
+        isDragging = false;
+      });
+
+      initRoadController();
+    }
+
+    function initRoadController() {
+      const stone = document.getElementById('stone');
+      const roadHit = document.getElementById('roadHit');
+      const svg = roadHit.ownerSVGElement;
+
+      let draggingStone = false;
+
+      stone.addEventListener('pointerdown', (e) => {
+        draggingStone = true;
+        stone.setPointerCapture(e.pointerId);
+      });
+
+      stone.addEventListener('pointermove', (e) => {
+        if (!draggingStone) return;
+        const pt = svg.createSVGPoint();
+        pt.x = e.clientX; pt.y = e.clientY;
+        const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
+        const cx = Math.max(0, Math.min(340, svgP.x));
+        const cy = Math.max(0, Math.min(240, svgP.y));
+        stone.setAttribute('cx', cx.toFixed(1));
+        stone.setAttribute('cy', cy.toFixed(1));
+
+        const tNorm = cx / 340;
+        audio.voiceDurationSec = 1 + tNorm * 19; // 1..20 сек
+      });
+
+      stone.addEventListener('pointerup', (e) => {
+        draggingStone = false;
+        try { stone.releasePointerCapture(e.pointerId); } catch(_) {}
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Resize
+
+    function onResize() {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      if (lsdUniforms) {
+        lsdUniforms.u_res.value.set(innerWidth, innerHeight);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Animation loop
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const dt = clock.getDelta();
+
+      if (!isDragging) {
+        chandelier.rotation.y += angularVelocity;
+        angularVelocity *= damping;
+        if (Math.abs(angularVelocity) < 0.00001) angularVelocity = 0;
+        updateGlobalPitchFactor();
+      }
+
+      if (lsdUniforms) {
+        lsdUniforms.u_time.value += dt;
+        lsdUniforms.u_speed.value = 0.7 + Math.min(2.0, Math.abs(angularVelocity) * 50);
+      }
+
+      drawLightnings();
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
